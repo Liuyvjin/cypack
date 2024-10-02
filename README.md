@@ -42,7 +42,7 @@ Then, to be compatible with [PEP-0517](https://www.python.org/dev/peps/pep-0517/
 
 ```
 [build-system]
-requires = ["setuptools>=42", "wheel", "cypackage[build]"]
+requires = ["setuptools>=42", "wheel", "cypack[build]"]
 build-backend = "setuptools.build_meta"
 ```
 
@@ -52,8 +52,8 @@ build-backend = "setuptools.build_meta"
 from setuptools import setup, find_packages
 
 setup(
-    setup_requires=['cypackage[build]'],
-    cypackage=True,
+    setup_requires=['cypack[build]'],
+    cypack=True,
     ...
     packages=find_packages(),
 )
@@ -181,8 +181,8 @@ build-backend = "setuptools.build_meta"
 from setuptools import setup, find_packages
 
 setup(
-    setup_requires=['cypackage[build]'],
-    cypackage=True,
+    setup_requires=['cypack[build]'],
+    cypack=True,
     packages=find_packages(),
 )
 ```
@@ -212,7 +212,7 @@ Create a `pyproject.toml` file with something like this:
 ```toml
 [build-system]
 build-backend = "poetry.core.masonry.api"
-requires = ["cypackage[poetry]"]
+requires = ["cypack[poetry]"]
 
 [tool.poetry]
 name = "test"
@@ -229,7 +229,7 @@ build = 'poetry_build.py'
 
 [tool.poetry.dependencies]
 python = "^3.7"
-cypackage = "*"
+cypack = "*"
 
 [build-system]
 requires = ["poetry-core>=1.2.0a2"]
@@ -239,9 +239,9 @@ build-backend = "poetry.core.masonry.api"
 and a file `./poetry_build.py`:
 
 ```python
-import cypackage
+import cypack
 def build(setup_kw):
-    cypackage.build_cypackage(setup_kw)
+    cypack.build_cypack(setup_kw)
 ```
 
 Then, you can build the package with:
@@ -260,7 +260,7 @@ pip wheel -w dist .
 
 Don't forget to add a file `__compile__.py` with nothing in package to compiled.
 
-In the `setup.py`, add `setup_requires` and `cypackage=True`:
+In the `setup.py`, add `setup_requires` and `cypack=True`:
 
 ```python
 from setuptools import setup, find_packages
@@ -268,9 +268,9 @@ from setuptools import setup, find_packages
 setup(
     name="myname",
     version="v0.0.0",
-    setup_requires=['cypackage[build]'],
-    install_requires=['cypackage'],
-    cypackage=True,
+    setup_requires=['cypack[build]'],
+    install_requires=['cypack'],
+    cypack=True,
     packages=find_packages(),
 )
 ```
@@ -288,18 +288,18 @@ setuptools packaging needs in a consistent manner.
 
 Don't forget to add a file `__compile__.py` with nothing in package to compiled.
 
-You can use use PBR with cypackage in `setup.cfg`:
+You can use use PBR with cypack in `setup.cfg`:
 
 ```
 [metadata]
 name = my_compiled_project
-setup_requires=cypackage,pbr
-cypackage=True
+setup_requires=cypack,pbr
+cypack=True
 pbr=True
 ...
 [options]
 install_requires =
-    cypackage
+    cypack
 ```
 
 or `setup.py`
@@ -308,9 +308,9 @@ or `setup.py`
 from setuptools import setup
 
 setup(
-    setup_requires=['pbr','cypackage[build]'],
+    setup_requires=['pbr','cypack[build]'],
     pbr=True,
-    cypackage=True,
+    cypack=True,
 )
 ```
 
@@ -323,21 +323,21 @@ python setup.py bdist_wheel
 # Sample
 
 The project [test-cythonpackage](https://github.com/pprados/test-cythonpackage) propose a tiny exemple
-to use cypackage, and generate all binary version,
+to use cypack, and generate all binary version,
 with a [GitHub Action](https://docs.github.com/en/actions).
 
 # Advanced usage
 
 To make this magic, we manipulate some special parameters at different levels.
-You can remove some manipulation with a dictionary in `cypackage` parameter.
+You can remove some manipulation with a dictionary in `cypack` parameter.
 
 ```python
 from setuptools import setup, find_packages
 
 setup(
-    setup_requires=['pbr','cypackage'],
+    setup_requires=['pbr','cypack'],
     pbr=True,
-    cypackage={
+    cypack={
         "inject_ext_modules": True,
         "inject_init": True,
         "remove_source": True,
@@ -348,10 +348,10 @@ setup(
 )
 ```
 
-and you can de-activate cypackage with the environment variable `CYPACKAGE=false`
+and you can de-activate cypack with the environment variable `CYPACK=false`
 
 ```shell
-CYPACKAGE=false python setup.py bdist_wheel
+CYPACK=false python setup.py bdist_wheel
 ```
 
 to generate a *classical* version, without compilation and with python source code.
@@ -374,7 +374,7 @@ setup(...
                     sources=['foo/*.py']
                 )
         ],
-        build_dir="build/cypackage",
+        build_dir="build/cypack",
         compiler_directives={'language_level': 3}
       )
 )
@@ -386,8 +386,8 @@ By default, during the build process, all the `__init__.py` file for the package
 on the fly, to inject two line:
 
 ```python
-import cypackage
-cypackage.init(__name__)
+import cypack
+cypack.init(__name__)
 ```
 
 If this manipulation break something, set this parameter to `False` and add yourself these two lines
@@ -408,7 +408,7 @@ Normally, it's possible to compile the source code to python-byte-code
 with `python setup.py build_py --compile`.
 But the `bdist_wheel` can not receive the `--compile` parameter.
 
-With cypackage, by default, the `compile` is set to `True`,
+With cypack, by default, the `compile` is set to `True`,
 and the `optimize` is set to `1` to remove the assertions.
 
 You can change these parameters.
@@ -420,11 +420,11 @@ You can exclude this file with a list of glob pattern.
 
 ```python
 setup(
-    setup_requires=['pbr','cypackage'],
+    setup_requires=['pbr','cypack'],
     pbr=True,
-    cypackage={
+    cypack={
         "exclude": ["foo/*special.py"]  # List of glob
     },
-    install_requires = ["cypackage"]
+    install_requires = ["cypack"]
 )
 ```

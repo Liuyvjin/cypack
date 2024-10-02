@@ -87,7 +87,7 @@ class _build_py(original_build_py):
         self.inject_init = conf["inject_init"]
         self._exclude = set(itertools.chain.from_iterable([glob(g) for g in conf["exclude"]]))
         self._patched_init = []
-        if os.environ.get("CYPACKAGE_DEBUG", "False").lower() == "true":
+        if os.environ.get("CYPACK_DEBUG", "False").lower() == "true":
             print(f"=====> {self.compile=} {self.optimize=} {self.remove_source=} {self.inject_init=} {self._exclude=}")
 
     def find_package_modules(self, package: str, package_dir: str) -> List[Tuple[str, str, str]]:
@@ -128,7 +128,7 @@ class _build_py(original_build_py):
     def build_module(self, module, module_file, package) -> Tuple[str, int]:
         """ Inject init() in __init__ files"""
         outfile, copied = super().build_module(module, module_file, package)
-        inject = f"import cypackage; cypackage.init(__name__, set({[m.split('.')[0] for m in self.keep_modules]}));\n"  # NOTE, keep_modules 使用正常的加载方式
+        inject = f"import cypack; cypack.init(__name__, set({[m.split('.')[0] for m in self.keep_modules]}));\n"  # NOTE, keep_modules 使用正常的加载方式
         if self.inject_init:
             if outfile.endswith("__init__.py"):
                 # print(f"**** patch {outfile}")
@@ -141,7 +141,7 @@ class _build_py(original_build_py):
                     for i, line in enumerate(lines):
                         if line.strip().startswith("#"):
                             continue
-                        if not line.startswith("import cypackage;"):
+                        if not line.startswith("import cypack;"):
                             lines.insert(i, inject)
                             update = True
                         else:
@@ -157,13 +157,13 @@ class _build_py(original_build_py):
         return outfile, copied
 
 
-def build_cypackage(setup: Dict[str, Any], conf: Union[bool, Dict[str, Any]] = True):
+def build_cypack(setup: Dict[str, Any], conf: Union[bool, Dict[str, Any]] = True):
     """ Plugin for setuptools """
     global _conf
     if not conf:
         return
-    if os.environ.get("CYPACKAGE", "True").lower() in ['0', 'false']:
-        warnings.warn("Ignore cypackage")
+    if os.environ.get("CYPACK", "True").lower() in ['0', 'false']:
+        warnings.warn("Ignore cypack")
         return
     if isinstance(conf, dict):
         _conf = {**_conf, **conf}
@@ -176,7 +176,7 @@ def build_cypackage(setup: Dict[str, Any], conf: Union[bool, Dict[str, Any]] = T
         else:
             compiled_module = cythonize(_compile_packages(_conf, packages),
                                         compiler_directives={'language_level': 3},
-                                        build_dir="build/cypackage",
+                                        build_dir="build/cypack",
                                         )
         if ext_modules:
             ext_modules.extend(compiled_module)
@@ -190,11 +190,11 @@ def build_cypackage(setup: Dict[str, Any], conf: Union[bool, Dict[str, Any]] = T
 
     if 'CFLAGS' not in os.environ:
         os.environ['CFLAGS'] = '-O3'
-    if os.environ.get("CYPACKAGE_DEBUG", "False").lower() == "true":
+    if os.environ.get("CYPACK_DEBUG", "False").lower() == "true":
         print("=====> ", end='')
         pprint(setup)
 
 
 # Plugin for setup.py
-def cypackage(setup, attr, value: Union[bool, Dict[str, Any]]):
-    build_cypackage(vars(setup), value)
+def cypack(setup, attr, value: Union[bool, Dict[str, Any]]):
+    build_cypack(vars(setup), value)

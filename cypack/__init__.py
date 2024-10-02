@@ -18,8 +18,8 @@ __all__ = ['init']
 
 try:
     import setuptools
-    from .build import build_cypackage, cypackage
+    from .build import build_cypack, cypack
 
-    __all__ = ['init', 'build_cypackage', "cypackage"]
+    __all__ = ['init', 'build_cypack', "cypack"]
 except ImportError:
     pass  # Ignore. Use in runtime, not in build time

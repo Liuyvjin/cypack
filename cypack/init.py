@@ -25,7 +25,7 @@ from typing import Optional
 
 
 # @see importlib.machinery.PathFinder
-class _CyPackageMetaPathFinder(abc.MetaPathFinder):
+class _CyPackMetaPathFinder(abc.MetaPathFinder):
     def __init__(self, name_filter: str, file: str, keep_modules: set):
         """
         自定义 MetaPathFinder, 用于找到和加载 Cython 编译的模块
@@ -35,7 +35,7 @@ class _CyPackageMetaPathFinder(abc.MetaPathFinder):
         - file : str, __compile__.so 文件路径
         - keep_modules : set, 保持正常加载的模块
         """
-        super(_CyPackageMetaPathFinder, self).__init__()
+        super(_CyPackMetaPathFinder, self).__init__()
         self._name_filter = name_filter
         self._file = file
         self._keep_modules = keep_modules
@@ -62,4 +62,4 @@ def init(module_name: str, keep_modules: set) -> None:
             break
     else:
         _registered_prefix.add(prefix)
-        sys.meta_path.append(_CyPackageMetaPathFinder(prefix, module.__file__, keep_modules))
+        sys.meta_path.append(_CyPackMetaPathFinder(prefix, module.__file__, keep_modules))
