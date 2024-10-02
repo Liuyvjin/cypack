@@ -128,7 +128,7 @@ class _build_py(original_build_py):
     def build_module(self, module, module_file, package) -> Tuple[str, int]:
         """ Inject init() in __init__ files"""
         outfile, copied = super().build_module(module, module_file, package)
-        inject = f"import cypackage; cypackage.init(__name__, set({[m.split('.')[0] for m in self.keep_modules]}));"  # NOTE, keep_modules 使用正常的加载方式
+        inject = f"import cypackage; cypackage.init(__name__, set({[m.split('.')[0] for m in self.keep_modules]}));\n"  # NOTE, keep_modules 使用正常的加载方式
         if self.inject_init:
             if outfile.endswith("__init__.py"):
                 # print(f"**** patch {outfile}")
@@ -141,8 +141,11 @@ class _build_py(original_build_py):
                     for i, line in enumerate(lines):
                         if line.strip().startswith("#"):
                             continue
-                        if not line.startswith(inject):
-                            lines[i] = inject + line
+                        if not line.startswith("import cypackage;"):
+                            lines.insert(i, inject)
+                            update = True
+                        else:
+                            lines[i] = inject
                             update = True
                         break
                     else:
