@@ -44,6 +44,7 @@ def _compile_packages(conf: Dict[str, Any], packages: List[str]) -> List[Extensi
     """
     extensions: List[Extension] = []
     exclude_files = set(itertools.chain.from_iterable([glob(g) for g in conf["exclude"]]))
+    exclude_files = [str(Path(f)) for f in exclude_files]
 
     if not packages:
         return extensions
