@@ -178,6 +178,7 @@ def build_cypack(setup: Dict[str, Any], conf: Union[bool, Dict[str, Any]] = True
             compiled_module = cythonize(_compile_packages(_conf, packages),
                                         compiler_directives={'language_level': 3},
                                         build_dir="build/cypack",
+                                        nthreads=8
                                         )
         if ext_modules:
             ext_modules.extend(compiled_module)
