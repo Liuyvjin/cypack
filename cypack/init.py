@@ -16,6 +16,7 @@
 import importlib
 import importlib.abc as abc  # Never remove this import, else the importlib.abc can not be visible with Python 3.10
 import importlib.util
+import importlib.machinery
 
 import sys
 
@@ -40,14 +41,24 @@ class _CyPackMetaPathFinder(abc.MetaPathFinder):
         self._file = file
         self._keep_modules = keep_modules
 
-    def find_module(self, fullname: str, path: str) -> Optional[importlib.machinery.ExtensionFileLoader]:
+    def find_spec(self, fullname: str, path: str, target=None) -> Optional[importlib.machinery.ModuleSpec]:
         last_name = fullname.split('.')[-1]
         if last_name in self._keep_modules:  # NOTE : 保持正常加载的模块
             return None
 
         if fullname.startswith(self._name_filter):
-            # use this extension-file but PyInit-function of another module:
-            return importlib.machinery.ExtensionFileLoader(fullname, self._file)
+            # Create a ModuleSpec for the extension module
+            spec = importlib.machinery.ModuleSpec(fullname, importlib.machinery.ExtensionFileLoader(fullname, self._file), origin=self._file)
+            return spec
+
+        return None
+
+    # Keep find_module for backward compatibility, but prefer find_spec
+    def find_module(self, fullname: str, path: str) -> Optional[importlib.machinery.ExtensionFileLoader]:
+        spec = self.find_spec(fullname, path)
+        if spec is not None:
+            return spec.loader
+        return None
 
 
 _registered_prefix = set()
