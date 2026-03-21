@@ -3,7 +3,6 @@ import shutil
 import warnings
 from fnmatch import fnmatch
 from pathlib import Path
-from pprint import pprint
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from Cython.Build import cythonize
@@ -49,6 +48,10 @@ _DEV_BRIDGE_START = "# CYPACK-DEV-BEGIN"
 _DEV_BRIDGE_END = "# CYPACK-DEV-END"
 
 
+# ---------------------------
+# 路径 / 模式基础工具
+# ---------------------------
+
 def _resolve_package_path(package: str, package_dir: Dict[str, str]) -> Path:
     """
     把 setuptools 的包名解析成真实源码目录，兼容 src/ 布局。
@@ -69,6 +72,10 @@ def _resolve_package_path(package: str, package_dir: Dict[str, str]) -> Path:
         return Path(package_dir[""]) / Path(*parts)
     return Path(*parts)
 
+
+# ---------------------------
+# __compile__.py 与路径归一化
+# ---------------------------
 
 def _load_compile_config(compile_path: Path) -> Dict[str, Any]:
     """
@@ -111,9 +118,21 @@ def _normalize_rel_path(value: str) -> str:
     return value
 
 
-def _normalize_rel_paths(values: Iterable[str]) -> Set[str]:
-    """批量归一化相对路径。"""
-    return {_normalize_rel_path(value) for value in values}
+def _iter_files(root: Path, pattern: str = "*", *, skip_cache: bool = False) -> Iterable[Path]:
+    """
+    按稳定顺序遍历目录下文件。
+
+    Args:
+        root: 遍历起点目录。
+        pattern: 传给 Path.rglob() 的匹配模式。
+        skip_cache: 为 True 时跳过 __pycache__ 下的文件。
+    """
+    for path in sorted(root.rglob(pattern)):
+        if not path.is_file():
+            continue
+        if skip_cache and "__pycache__" in path.parts:
+            continue
+        yield path
 
 
 def _has_glob_pattern(value: str) -> bool:
@@ -140,9 +159,7 @@ def _resolve_keep_paths(source_root: Path, keep_modules: Iterable[str]) -> Set[s
             resolved.add(item)
             continue
 
-        for path in source_root.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in _iter_files(source_root):
             rel_path = path.relative_to(source_root).as_posix()
             if _match_patterns(rel_path, [item]):
                 resolved.add(rel_path)
@@ -205,6 +222,13 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _copy_and_track(src: Path, dst: Path, outputs: List[str]) -> None:
+    """复制文件并把成功生成的目标文件登记到输出清单。"""
+    _copy_if_exists(src, dst)
+    if dst.exists():
+        outputs.append(str(dst))
+
+
 def _normalize_build_source_path(path: Path) -> str:
     """
     规范化传给 Cython 的源码路径。
@@ -225,9 +249,24 @@ def _package_output_dir(build_lib: str, package: str) -> Path:
     return Path(build_lib, *package.split("."))
 
 
-def _restore_log_threshold(previous: int) -> None:
-    """恢复 distutils 日志级别。"""
-    distutils_log.set_threshold(previous)
+def _get_package_data_patterns(package: str, package_data: Any) -> List[str]:
+    """
+    读取某个包在 setup(package_data=...) 里的资源匹配规则。
+
+    bridge 资源最终会映射到 bridge 包目录，因此这里按 bridge 包名本身取规则，
+    例如 ``xensesdk.retiles`` / ``xensesdk.ezgl``。
+    """
+    if not isinstance(package_data, dict):
+        return []
+
+    patterns: List[str] = []
+    for key in ("", "*", package):
+        values = package_data.get(key, [])
+        if isinstance(values, str):
+            patterns.append(values)
+        else:
+            patterns.extend(values)
+    return patterns
 
 
 def _short_build_message(cmd: List[str]) -> Optional[str]:
@@ -247,16 +286,14 @@ def _short_build_message(cmd: List[str]) -> Optional[str]:
     return None
 
 
-def _inject_init_code(content: str, package: str, keep_roots: List[str]) -> str:
+def _inject_init_code(content: str, keep_roots: List[str]) -> str:
     """
     向构建产物里的 __init__.py 注入 cypack.init()。
 
     Args:
         content: 原始 __init__.py 内容。
-        package: 当前包名，仅用于语义对应。
         keep_roots: 需要绕过 import hook 的顶层模块名。
     """
-    del package
     inject = f"import cypack; cypack.init(__name__, set({keep_roots!r}))\n"
     lines = content.splitlines(keepends=True)
 
@@ -297,6 +334,10 @@ def _strip_dev_bridge(content: str) -> str:
     return "".join(result)
 
 
+# ---------------------------
+# 源码筛选 / 编译输入收集
+# ---------------------------
+
 def _collect_compile_sources(source_root: Path, conf: Dict[str, Any]) -> List[str]:
     """
     收集应被编进单个包级 __compile__ 扩展的源码文件。
@@ -309,39 +350,160 @@ def _collect_compile_sources(source_root: Path, conf: Dict[str, Any]) -> List[st
     child_roots = [Path(item) for item in conf.get("child_compile_roots", [])]
     sources: List[str] = []
 
-    for path in sorted(source_root.rglob("*")):
-        if not path.is_file() or path.suffix not in _PYTHON_SOURCE_SUFFIXES:
+    for path in _iter_files(source_root):
+        if path.suffix not in _PYTHON_SOURCE_SUFFIXES:
             continue
 
         rel_path = path.relative_to(source_root).as_posix()
 
-        # bridge 构建会把 vendor 源码“吸收”进 bridge 包，因此最终产物
-        # 不应该再保留 _vendor 原始源码树。
-        if _is_vendor_source(rel_path):
-            continue
-
-        # 父包编译时必须跳过子编译包目录，否则父子两个 __compile__
-        # 会同时尝试接管同一批模块。
-        if _is_child_compile_path(rel_path, child_roots):
-            continue
-
-        if path.name in _SKIP_SOURCE_NAMES:
-            if path.name == "__compile__.py":
-                _LOG.debug("ignore vendor compile marker: %s", path)
-            continue
-
-        if _match_patterns(rel_path, conf["exclude"]):
-            _LOG.debug("exclude source: %s", rel_path)
-            continue
-
-        if rel_path in keep_paths:
-            _LOG.debug("keep source: %s", rel_path)
+        if not _should_compile_python_source(path, rel_path, conf, keep_paths, child_roots):
             continue
 
         sources.append(_normalize_build_source_path(path))
 
     return sources
 
+
+def _should_compile_python_source(
+    path: Path,
+    rel_path: str,
+    conf: Dict[str, Any],
+    keep_paths: Set[str],
+    child_roots: Iterable[Path],
+) -> bool:
+    """判断某个 Python 源文件是否应被编进 __compile__。"""
+    # bridge 构建会把 vendor 源码“吸收”进 bridge 包，因此最终产物
+    # 不应该再保留 _vendor 原始源码树。
+    if _is_vendor_source(rel_path):
+        return False
+
+    # 父包编译时必须跳过子编译包目录，否则父子两个 __compile__
+    # 会同时尝试接管同一批模块。
+    if _is_child_compile_path(rel_path, child_roots):
+        return False
+
+    if path.name in _SKIP_SOURCE_NAMES:
+        if path.name == "__compile__.py":
+            _LOG.debug("ignore vendor compile marker: %s", path)
+        return False
+
+    if _match_patterns(rel_path, conf["exclude"]):
+        _LOG.debug("exclude source: %s", rel_path)
+        return False
+
+    if rel_path in keep_paths:
+        _LOG.debug("keep source: %s", rel_path)
+        return False
+
+    return True
+
+
+def _bridge_dir_has_payload(
+    source_root: Path,
+    dir_rel_path: Path,
+    conf: Dict[str, Any],
+    keep_paths: Set[str],
+) -> bool:
+    """
+    判断 bridge 子目录是否真的需要保留为包目录。
+
+    只有当目录下还存在会进入最终包的内容时，才复制它的 __init__.py。
+    这样像 ``exclude = ["examples/*.py"]`` 这类配置就不会只剩一个空的
+    ``examples/__init__.py`` 目录。
+    """
+    child_roots = [Path(item) for item in conf.get("child_compile_roots", [])]
+    dir_root = source_root / dir_rel_path
+
+    for src in _iter_files(dir_root, skip_cache=True):
+        rel_path = src.relative_to(source_root).as_posix()
+        if rel_path == (dir_rel_path / "__init__.py").as_posix():
+            continue
+
+        if src.suffix in _PYTHON_SOURCE_SUFFIXES:
+            if rel_path in keep_paths:
+                return True
+            if _should_compile_python_source(src, rel_path, conf, keep_paths, child_roots):
+                return True
+            continue
+
+        if src.suffix in {".c", ".pyc", ".pyo"}:
+            continue
+        if _match_patterns(rel_path, conf["exclude"]):
+            continue
+        return True
+
+    return False
+
+
+def _create_package_config(
+    package: str,
+    package_path: Path,
+    compile_path: Path,
+    conf: Dict[str, Any],
+    local_conf: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    把全局配置与包内 __compile__.py 合并成逐包配置。
+
+    Args:
+        package: 当前包名。
+        package_path: 当前包源码目录。
+        compile_path: 当前包的 __compile__.py 路径。
+        conf: 全局 cypack 配置。
+        local_conf: __compile__.py 中读取出的局部配置。
+    """
+    package_conf = {
+        **conf,
+        "exclude": list(conf["exclude"]) + list(local_conf["exclude"]),
+        "keep_modules": list(conf["keep_modules"]) + list(local_conf["keep_modules"]),
+        "vendor_path": local_conf["vendor_path"],
+        "package": package,
+        "package_path": package_path,
+        "compile_path": compile_path,
+    }
+
+    if local_conf["vendor_path"]:
+        # bridge 包：实际编译 vendor_path 指向的源码，但产物名仍然挂在
+        # bridge 包名下，例如 main_module.sub_module.__compile__。
+        package_conf["is_bridge"] = True
+        package_conf["source_root"] = (package_path / local_conf["vendor_path"]).resolve()
+    else:
+        package_conf["is_bridge"] = False
+        package_conf["source_root"] = package_path
+
+    package_conf["keep_roots"] = _compile_skip_roots(package_conf["keep_modules"])
+    return package_conf
+
+
+def _populate_child_compile_metadata(configs: Dict[str, Dict[str, Any]]) -> None:
+    """
+    回填父子编译包之间的派生信息。
+
+    目前主要补两类数据：
+    - child_compile_roots：父包编译时要跳过的子编译包目录
+    - keep_roots：父包 import hook 需要放行的子编译包顶层名
+    """
+    for package, package_conf in configs.items():
+        package_root = package_conf["package_path"]
+
+        # 如果 a 和 a.b 都会被编译，那么 a 必须把 b 视作 keep root，
+        # 这样子包导入才会下沉到 a.b 自己的 finder，而不是被父包劫持。
+        package_conf["child_compile_roots"] = [
+            other_conf["package_path"].relative_to(package_root).as_posix()
+            for other_package, other_conf in configs.items()
+            if other_package != package and other_conf["package_path"].is_relative_to(package_root)
+        ]
+        child_keep_roots = [
+            other_package[len(package) + 1 :].split(".", 1)[0]
+            for other_package in configs
+            if other_package.startswith(package + ".")
+        ]
+        package_conf["keep_roots"] = _unique_extend(package_conf["keep_roots"], child_keep_roots)
+
+
+# ---------------------------
+# 逐包配置 / Extension 构建
+# ---------------------------
 
 def _build_package_configs(setup_dict: Dict[str, Any], conf: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """
@@ -364,27 +526,7 @@ def _build_package_configs(setup_dict: Dict[str, Any], conf: Dict[str, Any]) -> 
             continue
 
         local_conf = _load_compile_config(compile_path)
-        package_conf = {
-            **conf,
-            "exclude": list(conf["exclude"]) + list(local_conf["exclude"]),
-            "keep_modules": list(conf["keep_modules"]) + list(local_conf["keep_modules"]),
-            "vendor_path": local_conf["vendor_path"],
-            "package": package,
-            "package_path": package_path,
-            "compile_path": compile_path,
-        }
-
-        if local_conf["vendor_path"]:
-            # bridge 包：实际编译 vendor_path 指向的源码，但产物名仍然挂在
-            # bridge 包名下，例如 main_module.sub_module.__compile__。
-            source_root = (package_path / local_conf["vendor_path"]).resolve()
-            package_conf["is_bridge"] = True
-            package_conf["source_root"] = source_root
-        else:
-            package_conf["is_bridge"] = False
-            package_conf["source_root"] = package_path
-
-        package_conf["keep_roots"] = _compile_skip_roots(package_conf["keep_modules"])
+        package_conf = _create_package_config(package, package_path, compile_path, conf, local_conf)
         configs[package] = package_conf
         _LOG.info(
             "compile package discovered: %s (%s)",
@@ -392,24 +534,20 @@ def _build_package_configs(setup_dict: Dict[str, Any], conf: Dict[str, Any]) -> 
             "bridge" if package_conf["is_bridge"] else "package",
         )
 
-    for package, package_conf in configs.items():
-        package_root = package_conf["package_path"]
-
-        # 如果 a 和 a.b 都会被编译，那么 a 必须把 b 视作 keep root，
-        # 这样子包导入才会下沉到 a.b 自己的 finder，而不是被父包劫持。
-        package_conf["child_compile_roots"] = [
-            other_conf["package_path"].relative_to(package_root).as_posix()
-            for other_package, other_conf in configs.items()
-            if other_package != package and other_conf["package_path"].is_relative_to(package_root)
-        ]
-        child_keep_roots = [
-            other_package[len(package) + 1 :].split(".", 1)[0]
-            for other_package in configs
-            if other_package.startswith(package + ".")
-        ]
-        package_conf["keep_roots"] = _unique_extend(package_conf["keep_roots"], child_keep_roots)
-
+    _populate_child_compile_metadata(configs)
     return configs
+
+
+def _collect_extension_sources(package_conf: Dict[str, Any]) -> List[str]:
+    """
+    生成单个包对应的 Extension 源码列表。
+
+    每个包都会额外带上自己的 __compile__.py，作为包级扩展入口。
+    """
+    return [
+        *_collect_compile_sources(package_conf["source_root"], package_conf),
+        _normalize_build_source_path(package_conf["compile_path"]),
+    ]
 
 
 def _compile_packages(configs: Dict[str, Dict[str, Any]]) -> List[Extension]:
@@ -422,11 +560,7 @@ def _compile_packages(configs: Dict[str, Dict[str, Any]]) -> List[Extension]:
     extensions: List[Extension] = []
 
     for package, package_conf in configs.items():
-        sources = _collect_compile_sources(package_conf["source_root"], package_conf)
-        sources.append(_normalize_build_source_path(package_conf["compile_path"]))
-        if not sources:
-            continue
-
+        sources = _collect_extension_sources(package_conf)
         _LOG.info("collect %s source files for %s", len(sources), package)
         extensions.append(
             Extension(
@@ -456,6 +590,36 @@ def _find_owner_package_config(package: str, configs: Dict[str, Dict[str, Any]])
         return None
     return max(matches, key=lambda conf: len(conf["package"]))
 
+
+def _iter_bridge_package_configs(configs: Dict[str, Dict[str, Any]]):
+    """遍历所有 bridge 包配置。"""
+    for package, package_conf in configs.items():
+        if package_conf["is_bridge"]:
+            yield package, package_conf
+
+
+def _top_level_packages(configs: Dict[str, Dict[str, Any]]) -> List[str]:
+    """返回参与编译的顶层包名，保持原发现顺序。"""
+    packages: List[str] = []
+    for package in configs:
+        top_package = package.split(".", 1)[0]
+        if top_package not in packages:
+            packages.append(top_package)
+    return packages
+
+
+def _extend_setup_ext_modules(setup_dict: Dict[str, Any], compiled: List[Extension]) -> None:
+    """把新生成的 ext_modules 合并回 setup() 参数。"""
+    ext_modules = setup_dict.get("ext_modules", [])
+    if ext_modules:
+        ext_modules.extend(compiled)
+    else:
+        setup_dict["ext_modules"] = compiled
+
+
+# ---------------------------
+# setuptools 命令扩展
+# ---------------------------
 
 class _build_py(original_build_py):
     """自定义 build_py：剔除源码、保留 keep 文件，并改写 __init__.py。"""
@@ -545,7 +709,7 @@ class _build_py(original_build_py):
             # 不应再依赖这段逻辑，而是改由 cypack.init() 接管导入。
             content = _strip_dev_bridge(content)
 
-        content = _inject_init_code(content, package, package_conf["keep_roots"])
+        content = _inject_init_code(content, package_conf["keep_roots"])
         Path(outfile).write_text(content, encoding="utf-8-sig")
         _LOG.info("patched __init__.py: %s", package)
         return outfile, copied
@@ -566,47 +730,43 @@ class _build_py(original_build_py):
         如果磁盘上没有 ``chrome/__init__.py``，Python 会把 ``chrome`` 当成
         需要直接加载的扩展模块，进而触发 ``PyInit_chrome`` 一类错误。
         """
-        for package, package_conf in self.package_configs.items():
-            if not package_conf["is_bridge"]:
-                continue
-
+        for package, package_conf in _iter_bridge_package_configs(self.package_configs):
             output_root = _package_output_dir(self.build_lib, package)
             source_root = package_conf["source_root"]
+            keep_paths = _resolve_keep_paths(source_root, package_conf["keep_modules"])
 
-            for init_src in sorted(source_root.rglob("__init__.py")):
+            for init_src in _iter_files(source_root, "__init__.py"):
                 rel_path = init_src.relative_to(source_root)
                 if rel_path.as_posix() == "__init__.py":
                     # 根 __init__.py 使用 bridge 自己那份，不能被 vendor 覆盖。
                     continue
+                if not _bridge_dir_has_payload(source_root, rel_path.parent, package_conf, keep_paths):
+                    continue
 
                 init_dst = output_root / rel_path
-                _copy_if_exists(init_src, init_dst)
-                if init_dst.exists():
-                    self._generated_outputs.append(str(init_dst))
+                _copy_and_track(init_src, init_dst, self._generated_outputs)
 
             _LOG.info("copied bridge package __init__.py files: %s", package)
 
     def _copy_bridge_package_data(self) -> None:
-        """把 bridge vendor 里的非 Python 资源复制到 bridge 包目录。"""
-        for package, package_conf in self.package_configs.items():
-            if not package_conf["is_bridge"]:
-                continue
-
+        """按 package_data 规则把 bridge vendor 里的资源复制到 bridge 包目录。"""
+        for package, package_conf in _iter_bridge_package_configs(self.package_configs):
             output_root = _package_output_dir(self.build_lib, package)
             source_root = package_conf["source_root"]
+            patterns = _get_package_data_patterns(package, getattr(self.distribution, "package_data", None))
+            if not patterns:
+                _LOG.info("skip bridge package data without package_data rules: %s", package)
+                continue
 
-            for src in sorted(source_root.rglob("*")):
-                if not src.is_file():
-                    continue
-                if "__pycache__" in src.parts:
-                    continue
+            for src in _iter_files(source_root, skip_cache=True):
                 if src.suffix in {".py", ".pyx", ".c", ".pyc", ".pyo"}:
+                    continue
+                rel_path = src.relative_to(source_root).as_posix()
+                if not _match_patterns(rel_path, patterns):
                     continue
 
                 dst = output_root / src.relative_to(source_root)
-                _copy_if_exists(src, dst)
-                if dst.exists():
-                    self._generated_outputs.append(str(dst))
+                _copy_and_track(src, dst, self._generated_outputs)
 
             _LOG.info("copied bridge package data files: %s", package)
 
@@ -620,18 +780,14 @@ class _build_py(original_build_py):
             for rel_path in sorted(keep_paths):
                 src = source_root / rel_path
                 dst = output_root / rel_path
-                _copy_if_exists(src, dst)
-                if dst.exists():
-                    self._generated_outputs.append(str(dst))
+                _copy_and_track(src, dst, self._generated_outputs)
 
                 for parent in Path(rel_path).parents:
                     if str(parent) == ".":
                         continue
                     init_src = source_root / parent / "__init__.py"
                     init_dst = output_root / parent / "__init__.py"
-                    _copy_if_exists(init_src, init_dst)
-                    if init_dst.exists():
-                        self._generated_outputs.append(str(init_dst))
+                    _copy_and_track(init_src, init_dst, self._generated_outputs)
 
             if package_conf["is_bridge"]:
                 _LOG.info("copied keep files for bridge: %s", package)
@@ -639,13 +795,8 @@ class _build_py(original_build_py):
     def _generate_version_files(self) -> None:
         """在每个顶层编译包根目录生成 _version.py。"""
         version = self.distribution.metadata.version
-        top_packages = {
-            package.split(".", 1)[0]
-            for package in self.package_configs
-            if "." not in package or package.split(".", 1)[0] == package
-        }
 
-        for package in top_packages:
+        for package in _top_level_packages(self.package_configs):
             version_file = _package_output_dir(self.build_lib, package) / "_version.py"
             version_file.parent.mkdir(parents=True, exist_ok=True)
             version_file.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
@@ -676,7 +827,7 @@ class _build_ext(original_build_ext):
             try:
                 return original_spawn(cmd, **kwargs)
             finally:
-                _restore_log_threshold(previous)
+                distutils_log.set_threshold(previous)
 
         compiler.spawn = quiet_spawn
         try:
@@ -684,6 +835,10 @@ class _build_ext(original_build_ext):
         finally:
             compiler.spawn = original_spawn
 
+
+# ---------------------------
+# 对外入口
+# ---------------------------
 
 def build_cypack(setup_dict: Dict[str, Any], conf: Any = True):
     """
@@ -712,11 +867,7 @@ def build_cypack(setup_dict: Dict[str, Any], conf: Any = True):
             compiler_directives={"language_level": 3},
             build_dir="build/cypack",
         )
-        ext_modules = setup_dict.get("ext_modules", [])
-        if ext_modules:
-            ext_modules.extend(compiled)
-        else:
-            setup_dict["ext_modules"] = compiled
+        _extend_setup_ext_modules(setup_dict, compiled)
 
     cmdclass = setup_dict.get("cmdclass", {})
     cmdclass["build_py"] = _build_py
@@ -727,7 +878,7 @@ def build_cypack(setup_dict: Dict[str, Any], conf: Any = True):
         os.environ["CFLAGS"] = "-O3"
 
     if os.environ.get("CYPACK_DEBUG"):
-        pprint(setup_dict)
+        _LOG.debug("setup kwargs: %r", setup_dict)
 
 
 def cypack(setup, attr, value):
